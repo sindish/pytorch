@@ -24,7 +24,7 @@ AOTInductorError AOTInductorModelContainerCreate(
     AOTInductorModelContainerHandle* container_handle,
     size_t num_models) {
   if (num_models == 0) {
-    LOG(ERROR) << "num_models must be positive, but got 0";
+    std::cerr << "Error: num_models must be positive, but got 0" << std::endl;
     return AOTInductorError::Failure;
   }
   CONVERT_EXCEPTION_TO_ERROR_CODE({
@@ -32,6 +32,22 @@ AOTInductorError AOTInductorModelContainerCreate(
         new torch::aot_inductor::AOTInductorModelContainer(num_models);
     *container_handle =
         reinterpret_cast<AOTInductorModelContainerHandle>(container);
+  })
+}
+
+AOTInductorError AOTInductorModelContainerSetCubinDir(
+    AOTInductorModelContainerHandle container_handle,
+    const char* cubin_dir) {
+  CONVERT_EXCEPTION_TO_ERROR_CODE({
+    auto* container =
+        reinterpret_cast<torch::aot_inductor::AOTInductorModelContainer*>(
+            container_handle);
+
+    std::optional<std::string> cubin_dir_opt;
+    if (cubin_dir != nullptr) {
+      cubin_dir_opt.emplace(cubin_dir);
+    }
+    container->set_cubin_dir(cubin_dir_opt);
   })
 }
 

@@ -1602,6 +1602,7 @@ class CudaWrapperCodeGen(CppWrapperCodeGen):
         super().write_header()
         self.header.splice(
             """
+            #include <filesystem>
             #include <ATen/native/BinaryOps.h>
             #include <ATen/core/dispatch/Dispatcher.h>
             #include <c10/util/Exception.h>
@@ -1674,13 +1675,26 @@ class CudaWrapperCodeGen(CppWrapperCodeGen):
         cubin_path = params.get("cubin_path", None)
         assert os.path.exists(
             cubin_path
-        ), "cubin file should already exist at this moment"
+        ), f"cubin file should already exist at this moment: {cubin_path}"
 
         shared_mem = params.get("shared_mem", 0)
+        runtime_cubin_path_var = f"var_{next(self.arg_var_id)}"
         self.writeline(f"if ({name} == nullptr) {{")
+        self.writeline("    if (this->cubin_dir_.has_value()) {")
         self.writeline(
-            f"""     {name} = loadKernel("{cubin_path}", "{mangled_name}", {shared_mem});"""
+            f"""        std::filesystem::path {runtime_cubin_path_var}{{this->cubin_dir_.value()}};"""
         )
+        self.writeline(
+            f"""        {runtime_cubin_path_var} /= "{os.path.basename(cubin_path)}";"""
+        )
+        self.writeline(
+            f"""        {name} = loadKernel({runtime_cubin_path_var}.c_str(), "{mangled_name}", {shared_mem});"""
+        )
+        self.writeline("    } else {")
+        self.writeline(
+            f"""        {name} = loadKernel("{cubin_path}", "{mangled_name}", {shared_mem});"""
+        )
+        self.writeline("    }")
         self.writeline("}")
 
     def generate_args_decl(self, call_args):

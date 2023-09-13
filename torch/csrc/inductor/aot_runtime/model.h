@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -52,6 +53,10 @@ class AOTInductorModelBase {
   AOTInductorModelBase& operator=(AOTInductorModelBase&&) = delete;
   AOTInductorModelBase(const AOTInductorModelBase&) = delete;
   AOTInductorModelBase& operator=(const AOTInductorModelBase&) = delete;
+
+  void set_cubin_dir(std::optional<std::string> cubin_dir) {
+    cubin_dir_ = cubin_dir;
+  }
 
   // Currently, we assume that constants are passed as a part of the inputs.
   // Passes such as constant-folding may affect how we handle constants.
@@ -200,6 +205,9 @@ class AOTInductorModelBase {
   std::vector<ConstInfo> constants_info_;
 
   std::shared_ptr<ConstantMap> constants_;
+
+  // A directory with CUDA binary files, e.g. compiled kernels, etc.
+  std::optional<std::string> cubin_dir_;
 
   // Record if the model finishes an inference run so that its owning
   // AOTModelContainer can re-use this instance.

@@ -124,6 +124,12 @@ class AOTInductorModelContainer {
     }
   }
 
+  void set_cubin_dir(std::optional<std::string> cubin_dir) {
+    for (auto& model : models_) {
+      model->set_cubin_dir(cubin_dir);
+    }
+  }
+
   void run(
       const std::vector<at::Tensor>& inputs,
       std::vector<at::Tensor>& outputs,
