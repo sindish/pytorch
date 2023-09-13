@@ -53,7 +53,7 @@ class AOTInductorModelRunner:
             model, example_inputs, example_outputs, options
         )
         flat_example_inputs = fx_pytree.tree_flatten_spec(
-            example_inputs, exported.call_spec.in_spec
+            (example_inputs, {}), exported.call_spec.in_spec
         )
         optimized(flat_example_inputs, output_tensors)
         return pytree.tree_unflatten(output_tensors, output_spec)

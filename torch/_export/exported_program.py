@@ -95,7 +95,19 @@ def _unlift(gm, inp_pos_to_param_buffer_name, in_spec, out_spec, state_dict, buf
     # Step 3: Fix the input/output of the graph now that we deleted
     # some args.
     gm.graph.lint()
-    names = [f"arg_{i}" for i in range(len(in_spec.children_specs))]
+
+    def get_num_args(spec):
+        if isinstance(spec, pytree.LeafSpec):
+            return 1
+
+        num_args = 0
+        for child_spec in spec.children_specs:
+            num_args += get_num_args(child_spec)
+        return num_args
+
+    num_args = get_num_args(in_spec)
+    names = [f"arg_{i}" for i in range(num_args)]
+
     gm.graph._codegen = _PyTreeCodeGen(
         _PyTreeInfo(
             names,
@@ -344,4 +356,5 @@ def _process_constraints(
     return range_constraints, equality_constraints
 
 def combine_args_kwargs(args, kwargs):
-    return (args, kwargs) if kwargs else args
+    kwargs = kwargs or {}
+    return (args, kwargs)
