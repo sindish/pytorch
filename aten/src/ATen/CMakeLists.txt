@@ -444,7 +444,6 @@ if(USE_CUDA AND NOT USE_ROCM)
     list(APPEND ATen_CUDA_DEPENDENCY_LIBS
       ${CUDA_LIBRARIES}
       CUDA::cusparse_static
-      CUDA::curand_static
       CUDA::cufft_static_nocallback
     )
    if(NOT BUILD_LAZY_CUDA_LINALG)
@@ -464,7 +463,6 @@ if(USE_CUDA AND NOT USE_ROCM)
     list(APPEND ATen_CUDA_DEPENDENCY_LIBS
       ${CUDA_LIBRARIES}
       CUDA::cusparse
-      CUDA::curand
       CUDA::cufft
     )
    if(NOT BUILD_LAZY_CUDA_LINALG)
