@@ -1,6 +1,7 @@
 # Owner(s): ["module: linear algebra"]
 
 import unittest
+from itertools import product
 from functools import partial
 from typing import Optional
 
@@ -277,8 +278,155 @@ class TestFP8MatmulCuda(TestCase):
 
 
 
+@unittest.skipIf(TEST_WITH_ROCM, "ROCm doesn't support CUTLASS")
+@unittest.skipIf(not torch.cuda.is_available() or torch.cuda.get_device_capability(0)[0] != 8, "mixed dtypes MM only supported on SM 8.x")
+class TestMixedDtypesLinearCuda(TestCase):
+    @dtypes(torch.float16, torch.bfloat16)
+    def test_mixed_dtypes_linear(self, dtype: torch.dtype, device: str = "cuda"):
+        def preprocess_weights_for_mixed_gemm(inp):
+            assert inp.dtype == torch.int8
+            assert inp.dim() == 2
+
+            device = inp.device
+
+            nrows, ncols = inp.shape
+            assert nrows % 64 == 0
+            assert ncols % 64 == 0
+
+            # subbyte_transpose
+            tmp = inp.T
+
+            # permute_B_rows_for_mixed_gemm
+            # (permute cols actually, as transpose is applied first here)
+            cols_permuted = (
+                torch.tensor(
+                    [0, 1, 4, 5, 8, 9, 12, 13, 2, 3, 6, 7, 10, 11, 14, 15],
+                    device=device,
+                ).expand(nrows // 16, 16)
+                + (
+                    torch.arange(0, nrows // 16, device=device).reshape(-1, 1) * 16
+                ).expand(nrows // 16, 16)
+            ).view(-1)
+            outp = tmp.index_copy(1, cols_permuted, tmp)
+
+            # interleave_column_major_tensor
+            magic0 = 2
+            magic1 = 16
+
+            tmp0 = (
+                (
+                    torch.arange(0, ncols // magic0, device=device)
+                    * (nrows // 4 * magic0)
+                )
+                .view(-1, 1)
+                .repeat(1, nrows // 4 * magic0)
+                .view(-1)
+            )
+            tmp1 = (
+                (
+                    torch.arange(0, nrows // 4 // magic1, device=device)
+                    * (magic0 * magic1)
+                )
+                .view(-1, 1)
+                .repeat(1, magic1)
+                .view(-1)
+                .repeat(ncols)
+            )
+            tmp2 = (
+                (torch.arange(0, magic0, device=device) * magic1)
+                .view(-1, 1)
+                .repeat(1, nrows // 4)
+                .view(-1)
+                .repeat(ncols // magic0)
+            )
+            tmp3 = torch.arange(0, magic1, device=device).repeat(
+                nrows // 4 * ncols // magic1
+            )
+
+            outp_offsets = tmp0 + tmp1 + tmp2 + tmp3
+
+            tmp = outp.view(-1).view(torch.int32)
+            outp = torch.zeros_like(tmp)
+            outp.scatter_(0, outp_offsets, tmp)
+            outp = outp.view(inp.dtype).view(inp.shape)
+
+            # add_bias_and_interleave_quantized_tensor_inplace
+            tmp = outp.view(-1)
+
+            outp = torch.empty_like(tmp)
+            outp[0::4] = tmp[0::4]
+            outp[1::4] = tmp[2::4]
+            outp[2::4] = tmp[1::4]
+            outp[3::4] = tmp[3::4]
+            outp = (outp.to(torch.int) + 128).to(tmp.dtype)
+
+            return outp.view(inp.shape)
+
+        def run_test(batch_shape, m, n, k, add_bias, activation, dtype, device, rtol, atol):
+            if not add_bias and activation != "none":
+                return
+
+            val_lo, val_hi = -1, 1
+            valq_lo, valq_hi = -2, 2
+            input = make_tensor(
+                *batch_shape, m, k, low=val_lo, high=val_hi, dtype=dtype, device=device
+            )
+            weight = make_tensor(
+                k, n, low=valq_lo, high=valq_hi, dtype=torch.int8, device=device
+            )
+            scale = make_tensor(
+                (n,), low=val_lo, high=val_hi, dtype=input.dtype, device=device
+            )
+            bias = make_tensor(
+                (n,), low=val_lo, high=val_hi, dtype=input.dtype, device=device
+            ) if add_bias else None
+
+            input_ref = input.reshape(-1, input.shape[-1])
+            weight_ref = weight.to(input.dtype) * scale.expand(1, n)
+            bias_ref = bias.expand(1, n) if add_bias else torch.zeros((1, n), dtype=input.dtype, device=device) ### FIXME! use linear and then pass bias as None in base add_bias set to False
+            output_ref = torch.addmm(bias_ref, input_ref, weight_ref).reshape(
+                *input.shape[:-1], weight.shape[1]
+            )
+            if activation == "relu":
+                relu = torch.nn.ReLU()
+                output_ref = relu(output_ref)
+            elif activation == "silu":
+                silu = torch.nn.SiLU()
+                output_ref = silu(output_ref)
+
+            output = torch.ops.aten._mixed_dtypes_linear(
+                input,
+                preprocess_weights_for_mixed_gemm(weight).view(torch.uint8),
+                scale,
+                bias=bias,
+                activation=activation
+            )
+
+            torch.testing.assert_close(output, output_ref, rtol=rtol, atol=atol)
+
+        batch_shapes = [[], [2], [2, 1]]
+        shapes = [
+            [8, 64, 64],
+            [8, 64, 128],
+            [8, 128, 64],
+            [8, 128, 128],
+            [8, 128, 192],
+            [8, 128, 256],
+            [8, 256, 128],
+            [8, 256, 384],
+            [8, 384, 256],
+        ]
+        activations = [None, "relu", "silu"]
+        rtol, atol = 1e-3, 1e-3
+        if dtype == torch.bfloat16:
+            rtol, atol = 1e-2, 1e-2
+        for batch_shape, (m, n, k), add_bias, activation in \
+            product(batch_shapes, shapes, (False, True), activations):
+            run_test(batch_shape, m, n, k, add_bias, activation, dtype, device, rtol, atol)
+        
 instantiate_device_type_tests(TestMatmulCuda, globals(), except_for="cpu")
 instantiate_device_type_tests(TestFP8MatmulCuda, globals(), except_for="cpu")
+instantiate_device_type_tests(TestMixedDtypesLinearCuda, globals(), except_for="cpu")
 
 if __name__ == '__main__':
     TestCase._default_dtype_check_enabled = True
