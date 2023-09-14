@@ -1593,11 +1593,14 @@ class DynamicDimConstraintPrinter(StrPrinter):
 
     We use this to suggest code for specifying dynamic dim constraints.
     """
-    def __init__(self, symbol_to_source):
+    def __init__(self, symbol_to_source, source_name_to_debug_name):
         super().__init__()
         self.symbol_to_source = symbol_to_source
+        self.source_name_to_debug_name = source_name_to_debug_name
 
     def print_source(self, source) -> str:
+        if self.source_name_to_debug_name:
+            return source.name()
         return f"dynamic_dim({source.base.name()}, {source.idx})"
 
     def _print_Symbol(self, expr) -> str:
@@ -1619,7 +1622,7 @@ class DimConstraints:
     Solutions are "static" values or simplified "dynamic" constraints.
     """
 
-    def __init__(self, symbol_to_source, var_to_val, marked_dynamic):
+    def __init__(self, symbol_to_source, var_to_val, marked_dynamic, source_name_to_debug_name):
         # We try to solve systems of inequalities with 1 free variable.
         self._univariate_inequalities: Dict[sympy.Symbol, Set[sympy.Expr]] = defaultdict(set)
         # Among them, we prioritize solving for a free variable that has equalities.
@@ -1653,7 +1656,7 @@ class DimConstraints:
         self._dynamic_results: Set[str] = set()
 
         # printer for solutions
-        self._dcp = DynamicDimConstraintPrinter(symbol_to_source)
+        self._dcp = DynamicDimConstraintPrinter(symbol_to_source, source_name_to_debug_name)
 
         # inconsistencies found on substituting with concrete values / static solutions
         self._inconsistencies: List[str] = []
@@ -1911,7 +1914,6 @@ class DimConstraints:
         for source, expr in self._symbolic_equivalences:
             self._dynamic_results.add(f"{self._dcp.print_source(source)} == {self._dcp.doprint(expr)}")
 
-
     def forced_specializations(self):
         return "\n".join([
             (
@@ -1945,6 +1947,75 @@ class DimConstraints:
         self._dynamic_results = dynamic_results
 
     def prettify_results(self, original_signature: inspect.Signature):
+        if self._dcp.source_name_to_debug_name:
+            def transform(s):
+                for k, v in self._dcp.source_name_to_debug_name.items():
+                    s = s.replace(k, v)
+                return s
+
+            results = defaultdict(dict)
+            for s in self._static_results.union(self._dynamic_results):
+                t = transform(s)
+                if t == s:
+                    continue
+                left, op, right = t.split(" ")
+                if op == "==" and left == right:
+                    continue
+                if left.isdigit():
+                    left = int(left)
+                    if op == "<=":
+                        results[right]["min"] = left
+                    elif op == "<":
+                        results[right]["min"] = left + 1
+                    elif op == ">=":
+                        results[right]["max"] = left
+                    elif op == ">":
+                        results[right]["max"] = left - 1
+                    else:
+                        assert op == "=="
+                        results[right]["eq"] = left
+                elif right.isdigit():
+                    right = int(right)
+                    if op == "<=":
+                        results[left]["max"] = right
+                    elif op == "<":
+                        results[left]["max"] = right - 1
+                    elif op == ">=":
+                        results[left]["min"] = right
+                    elif op == ">":
+                        results[left]["min"] = right + 1
+                    else:
+                        assert op == "=="
+                        results[left]["eq"] = right
+                else:
+                    assert op == "=="
+                    results[left]["eq"] = right
+
+            dims = []
+            others = []
+            for k, c in results.items():
+                if "eq" in c:
+                    other = c["eq"]
+                    if isinstance(other, int):
+                        others.append(f"{k} = _  # {other}")
+                    else:
+                        others.append(f"{k} = {other}")
+                else:
+                    min_ = c.get("min", None)
+                    if min_ == 2:
+                        min_ = None
+                    max_ = c.get("max", None)
+                    if min_ is not None and max_ is not None:
+                        dims.append(f"{k} = Dim('{k}', min={min_}, max={max_})")
+                    elif min_ is not None:
+                        dims.append(f"{k} = Dim('{k}', min={min_})")
+                    elif max_ is not None:
+                        dims.append(f"{k} = Dim('{k}', max={max_})")
+                    else:
+                        others.append(f"{k} = Dim('{k}')")
+
+            return "\nConsider defining dimensions as follows:\n  " + "\n  ".join(dims + others) + "\n"
+
         # Note: Model inputs are wrapped as LocalSource in dynamo.
         # LocalSource.name() wraps the name with L[""]. We use regular
         # expression to do the replacement to avoid traversing up
@@ -2068,6 +2139,7 @@ class ShapeEnv:
         # range may contain ints which may not actually appear in
         # practice
         self.var_to_range: Dict[sympy.Symbol, ValueRanges] = {}
+        self.source_name_to_debug_name: Dict[str, str] = {}
         # Maps symbolic ints to their min/max range for runtime checks.
         # This is because we assume a graph generated with N=2 is general enough
         # for N < 2. Therefore, it will be too strict to assert N=2 at runtime.
@@ -2596,6 +2668,10 @@ class ShapeEnv:
 
         return r
 
+    def debug_name(self, source):
+        src_name = source.name()
+        return self.source_name_to_debug_name.get(src_name, src_name)
+
     def render_range_for_constraint_violation(self, source, c):
         if isinstance(c, StrictMinMaxConstraint):
             lower, upper = c.vr.lower, c.vr.upper
@@ -2604,13 +2680,13 @@ class ShapeEnv:
                 lower = None
             if upper >= default.upper:
                 upper = None
-            c_render = f"{source.name()} in the specified range"
+            c_render = f"{self.debug_name(source)} = {source.name()} in the specified range"
             if lower is not None and upper is not None:
-                c_render += f" {lower} <= {source.name()} <= {upper}"
+                c_render += f" {lower} <= {self.debug_name(source)} <= {upper}"
             elif lower is None and upper is not None:
-                c_render += f" {source.name()} <= {upper}"
+                c_render += f" {self.debug_name(source)} <= {upper}"
             elif lower is not None and upper is None:
-                c_render += f" {lower} <= {source.name()}"
+                c_render += f" {lower} <= {self.debug_name(source)}"
             return c_render
         return c.render(source)
 
@@ -2732,7 +2808,7 @@ class ShapeEnv:
         input_guards = []
 
         symbol_to_source = collections.defaultdict(list)
-        symbol_to_constraints = collections.defaultdict(list)
+        symbol_to_constraints = collections.defaultdict(set)
         constraint_violations : List[Tuple[bool, Callable[[], str]]] = []
 
         def record_constraint_violation(warn_only, msg, hint=None):
@@ -2784,7 +2860,7 @@ class ShapeEnv:
                 if isinstance(s, sympy.Symbol):
                     symbol_to_source[s].append(source)
                     if constraint is not None:
-                        symbol_to_constraints[s].append(constraint)
+                        symbol_to_constraints[s].add(constraint)
                 elif isinstance(-s, sympy.Symbol):
                     symbol_to_source[-s].append(NegateSource(source))
                 else:
@@ -2813,7 +2889,7 @@ class ShapeEnv:
                         var_with_range = self.render_range_for_constraint_violation(source, constraint)
                         msg = (
                             f"Not all values of {var_with_range} are valid because "
-                            f"{source.name()} was inferred to be equal to "
+                            f"{self.debug_name(source)} was inferred to be equal to "
                         )
                         record_constraint_violation(
                             constraint.warn_only,
@@ -2837,7 +2913,7 @@ class ShapeEnv:
                     var_with_range = self.render_range_for_constraint_violation(source, constraint)
                     msg = (
                         f"Not all values of {var_with_range} are valid because "
-                        f"{source.name()} was inferred to be a constant ({val}). "
+                        f"{self.debug_name(source)} was inferred to be a constant ({val}). "
                         "For more information about why it is constant, "
                         "run with TORCH_LOGS=dynamic."
                     )
@@ -2880,6 +2956,7 @@ class ShapeEnv:
             symbol_to_source,
             self.var_to_val,
             set(symbol_to_constraints.keys()),
+            self.source_name_to_debug_name,
         )
 
         if not _simplified:
@@ -2920,8 +2997,10 @@ class ShapeEnv:
                     not equalities_inputs.is_equal(source, symbol_to_source[expr][0])
                 ):
                     msg = (
-                        f"The specified set of equalities {equalities_inputs.render()} "
-                        f"is not sufficient; please also specify {source_ref(source)} == {sexpr}."
+                        f"The values of {self.debug_name(source)} = {source.name()} and "
+                        f"{self.debug_name(symbol_to_source[expr][0])} = {symbol_to_source[expr][0].name()} "
+                        "must always be equal. For more information about this inference, "
+                        "run with TORCH_LOGS=dynamic."
                     )
                     record_constraint_violation(equalities_inputs.warn_only, msg)
                 # NB: Not necessary to report constraint violations here:

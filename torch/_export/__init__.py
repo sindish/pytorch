@@ -61,7 +61,119 @@ from .passes.replace_view_ops_with_view_copy_ops_pass import (
 from .wrappers import _wrap_submodules
 
 
-def dynamic_dim(t: torch.Tensor, index: int):
+import sys
+
+from typing import NewType
+
+
+class _Dim(type):
+    pass
+
+
+def Dim(name, *, min=None, max=None):
+    """
+    Object describing possible values of a tensor dimension.
+    Like a symbolic integer with a range.
+    Can be shared by different dimensions of the same tensor, or of different tensors.
+    """
+    _min = 0 if min is None else min
+    _max = sys.maxsize if max is None else max
+    return _Dim(name, (int,), {"min": _min, "max": _max})
+
+
+def dims(*names: str):
+    """
+    Util to create multiple Dim objects.
+    """
+    return tuple(Dim(name) for name in names)
+
+
+class _(int):
+    pass
+
+
+TensorType = Tuple
+
+
+def export_rc(
+    f: Callable,
+    args: Tuple[Any, ...],
+    kwargs: Optional[Dict[str, Any]] = None,
+    *,
+    dynamic_shapes: Optional[Dict[str, Any]] = None,
+) -> ExportedProgram:
+    """
+    API for different ways of exporting with dynamic shape specifications.
+    1. Either pass dynamic shapes of inputs along with inputs in export call.
+    2. Or type arguments of exported function with expected dynamic shapes.
+    """
+    kwargs = kwargs if kwargs is not None else {}
+
+    from collections.abc import Mapping, Sequence
+    from typing import get_origin, get_args
+
+    def typing_zip(combined_args, dynamic_shapes):
+        if isinstance(combined_args, tuple):
+            if isinstance(dynamic_shapes, Sequence):
+                for arg, shape in zip(combined_args, dynamic_shapes):
+                    yield from typing_zip(arg, shape)
+            else:
+                assert get_origin(dynamic_shapes) is list, f"Unexpected {dynamic_shapes} matching tuple"
+                shape = get_args(dynamic_shapes)[0]
+                for arg in combined_args:
+                    yield from typing_zip(arg, shape)
+        elif isinstance(combined_args, dict):
+            if isinstance(dynamic_shapes, Mapping):
+                for arg, shape in zip(combined_args.values(), dynamic_shapes.values()):
+                    yield from typing_zip(arg, shape)
+            else:
+                assert get_origin(dynamic_shapes) is dict, f"Unexpected {dynamic_shapes} matching dict"
+                shape = get_args(dynamic_shapes)[1]
+                for arg in combined_args.values():
+                    yield from typing_zip(arg, shape)
+        # TODO: other container types
+        elif isinstance(combined_args, torch.Tensor):
+            yield (combined_args, dynamic_shapes)
+
+
+    from collections import defaultdict
+    symbols = defaultdict(list)
+
+    def update_symbols(tensor, shape):
+        if get_origin(shape) is tuple:
+            for i, dim in enumerate(get_args(shape)):
+                if isinstance(dim, _Dim):
+                    symbols[dim.__name__].append(dynamic_dim(tensor, i, debug_name=dim.__name__))
+        elif isinstance(shape, dict):
+            for i, dim in shape.items():
+                if isinstance(dim, _Dim):
+                    symbols[dim.__name__].append(dynamic_dim(tensor, i, debug_name=dim.__name__))
+
+    import inspect
+    signature = inspect.signature(f.forward) if isinstance(f, torch.nn.Module) else inspect.signature(f)
+    combined_args = signature.bind(*args, **kwargs).arguments
+
+    if dynamic_shapes is None:
+        dynamic_shapes = {
+            k: parameter.annotation
+            for k, parameter in signature.parameters.items()
+        }
+    for tensor, shape in typing_zip(combined_args, dynamic_shapes):
+        update_symbols(tensor, shape)
+
+    constraints = []
+    for dynamic_dims in symbols.values():
+        primary, *others = dynamic_dims
+        if others:
+            for other in others:
+                constraints.append(primary == other)
+        else:
+            constraints.append(primary)
+
+    return export(f, args, kwargs, constraints=constraints)
+
+
+def dynamic_dim(t: torch.Tensor, index: int, debug_name: str = None):
     if not isinstance(t, torch.Tensor):
         raise UserError(
             UserErrorType.DYNAMIC_DIM,
@@ -88,6 +200,7 @@ def dynamic_dim(t: torch.Tensor, index: int):
         StrictMinMaxConstraint(
             vr=ValueRanges(lower=2, upper=sympy.oo), warn_only=False
         ),
+        debug_name=debug_name,
     )
 
 
