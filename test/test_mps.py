@@ -85,6 +85,7 @@ def mps_ops_grad_modifier(ops):
         'index_fill': [torch.float16, torch.float32],  # missing `aten::_unique`.
         'aminmax': [torch.float32],
         'polar': [torch.float32],
+        '_embedding_bag_dense_backward': [torch.float16, torch.float32],
 
         # Correctness issues
         'atanh': [torch.float32],
